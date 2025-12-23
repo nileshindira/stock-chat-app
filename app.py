@@ -10,217 +10,261 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 
-app = FastAPI(title="Stock Chat Carousel (Demo)")
+app = FastAPI(title="Carousel-Only Demo Platform")
 
-# Serve frontend
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-# ---------- Demo stock universe ----------
-SYMBOLS = [
-    "NSE:RELIANCE", "NSE:TCS", "NSE:HDFCBANK", "NSE:INFY", "NSE:ICICIBANK",
-    "NSE:ITC", "NSE:SBIN", "NSE:BHARTIARTL", "NSE:LT", "NSE:AXISBANK"
+# ---------- Universal carousel schema (what the UI expects) ----------
+# Response:
+# {
+#   "assistant_text": "...",
+#   "carousels": [ {carousel}, {carousel}, ... ]
+# }
+#
+# carousel:
+# {
+#   "carousel_id": "...",
+#   "title": "...",
+#   "subtitle": "...",
+#   "layout": "card",
+#   "items": [ {item}, ... ]
+# }
+#
+# item:
+# {
+#   "id": "...",
+#   "title": "...",
+#   "subtitle": "...",
+#   "image": null,
+#   "badges": ["..."],
+#   "primary_value": "...",
+#   "secondary_value": "...",
+#   "actions": [{"label":"...", "action":"..."}],
+#   "metadata": {...}
+# }
+
+
+# ---------- Demo "catalogs" (like Canva templates / Booking hotels / Stocks) ----------
+TEMPLATES = [
+    {"id": "tpl_ig_post", "title": "Instagram Post", "subtitle": "1080×1080 • Social", "badges": ["Popular", "Free"]},
+    {"id": "tpl_resume", "title": "Resume", "subtitle": "A4 • Professional", "badges": ["ATS-friendly"]},
+    {"id": "tpl_pitch", "title": "Pitch Deck", "subtitle": "16:9 • Slides", "badges": ["Trending"]},
+    {"id": "tpl_logo", "title": "Logo", "subtitle": "Vector • Brand", "badges": ["Quick"]},
+    {"id": "tpl_story", "title": "IG Story", "subtitle": "1080×1920 • Social", "badges": ["New"]},
 ]
 
-def seed_prices() -> Dict[str, Dict[str, Any]]:
-    base = {}
-    for s in SYMBOLS:
-        base_price = random.uniform(200, 3500)
-        base[s] = {
-            "symbol": s,
-            "ltp": round(base_price, 2),
-            "change": 0.0,
-            "change_pct": 0.0,
-            "day_high": round(base_price * random.uniform(1.005, 1.03), 2),
-            "day_low": round(base_price * random.uniform(0.97, 0.995), 2),
-            "vol": random.randint(50_000, 5_000_000),
+HOTELS = [
+    {"id": "htl_1", "title": "Lakeview Residency", "subtitle": "Bengaluru • 4.3★", "badges": ["Breakfast", "Free cancellation"]},
+    {"id": "htl_2", "title": "City Central Hotel", "subtitle": "Mumbai • 4.1★", "badges": ["Deal", "Near metro"]},
+    {"id": "htl_3", "title": "Beachside Retreat", "subtitle": "Goa • 4.5★", "badges": ["Sea view"]},
+    {"id": "htl_4", "title": "Heritage Palace", "subtitle": "Jaipur • 4.6★", "badges": ["Luxury"]},
+    {"id": "htl_5", "title": "Budget Stay Plus", "subtitle": "Delhi • 4.0★", "badges": ["Best value"]},
+]
+
+STOCKS = [
+    {"id": "stk_RELIANCE", "title": "RELIANCE", "subtitle": "Energy • Large Cap", "badges": ["NSE"]},
+    {"id": "stk_TCS", "title": "TCS", "subtitle": "IT • Large Cap", "badges": ["NSE"]},
+    {"id": "stk_HDFCBANK", "title": "HDFCBANK", "subtitle": "Banking • Large Cap", "badges": ["NSE"]},
+    {"id": "stk_INFOSYS", "title": "INFY", "subtitle": "IT • Large Cap", "badges": ["NSE"]},
+    {"id": "stk_ITC", "title": "ITC", "subtitle": "FMCG • Large Cap", "badges": ["NSE"]},
+]
+
+
+# ---------- Live value state (for WebSocket updates) ----------
+# We'll update primary/secondary values continuously, per item.id
+LIVE: Dict[str, Dict[str, Any]] = {}
+
+
+def init_live_state():
+    # Templates: "Uses today"
+    for t in TEMPLATES:
+        LIVE[t["id"]] = {
+            "primary_value": f"{random.randint(1_000, 50_000)} uses",
+            "secondary_value": f"+{random.randint(1, 30)}% this week",
             "updated_at": int(time.time()),
         }
-    return base
 
-PRICE_STATE: Dict[str, Dict[str, Any]] = seed_prices()
+    # Hotels: "Price per night"
+    for h in HOTELS:
+        price = random.randint(1800, 12000)
+        LIVE[h["id"]] = {
+            "primary_value": f"₹{price}/night",
+            "secondary_value": f"{random.randint(5, 40)}% off",
+            "updated_at": int(time.time()),
+        }
 
-# ---------- Demo news ----------
-DEMO_NEWS = {
-    "NSE:RELIANCE": [
-        {"title": "Reliance: board meeting highlights expected", "source": "DemoWire", "ts": "2m ago"},
-        {"title": "Reliance: retail footfall trends remain strong", "source": "DemoWire", "ts": "18m ago"},
-    ],
-    "NSE:TCS": [
-        {"title": "TCS: deal pipeline commentary in focus", "source": "DemoWire", "ts": "6m ago"},
-    ],
-}
+    # Stocks: "Price"
+    for s in STOCKS:
+        price = random.uniform(200, 3500)
+        LIVE[s["id"]] = {
+            "primary_value": f"₹{price:.2f}",
+            "secondary_value": f"{random.uniform(-2.5, 2.5):+.2f}%",
+            "updated_at": int(time.time()),
+        }
 
-def get_news(symbol: str) -> List[Dict[str, Any]]:
-    # Always return a list (even if empty), UI renders it.
-    return DEMO_NEWS.get(symbol, [
-        {"title": f"{symbol}: no breaking news (demo feed)", "source": "DemoWire", "ts": "just now"}
-    ])
 
-# ---------- Chat request ----------
+init_live_state()
+
+
+def build_item(base: Dict[str, Any], actions: List[Dict[str, str]], extra_meta: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    live = LIVE.get(base["id"], {})
+    return {
+        "id": base["id"],
+        "title": base["title"],
+        "subtitle": base["subtitle"],
+        "image": None,
+        "badges": base.get("badges", []),
+        "primary_value": live.get("primary_value", "-"),
+        "secondary_value": live.get("secondary_value", "-"),
+        "actions": actions,
+        "metadata": extra_meta or {},
+    }
+
+
+def carousel(carousel_id: str, title: str, subtitle: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "carousel_id": carousel_id,
+        "title": title,
+        "subtitle": subtitle,
+        "layout": "card",
+        "items": items,
+    }
+
+
 class ChatRequest(BaseModel):
     message: str
 
 
-def normalize_query(q: str) -> str:
-    return (q or "").strip().lower()
-
-
-def pick_symbols_from_message(msg: str) -> List[str]:
-    q = normalize_query(msg)
-
-    # Super simple intent parsing (extend later)
-    if any(k in q for k in ["top movers", "movers", "trending", "hot", "watchlist"]):
-        return random.sample(SYMBOLS, k=min(6, len(SYMBOLS)))
-
-    # If user mentions a company name, map it
-    mapping = {
-        "reliance": "NSE:RELIANCE",
-        "tcs": "NSE:TCS",
-        "hdfc": "NSE:HDFCBANK",
-        "hdfcbank": "NSE:HDFCBANK",
-        "infy": "NSE:INFY",
-        "infosys": "NSE:INFY",
-        "icici": "NSE:ICICIBANK",
-        "itc": "NSE:ITC",
-        "sbin": "NSE:SBIN",
-        "sbi": "NSE:SBIN",
-        "bharti": "NSE:BHARTIARTL",
-        "airtel": "NSE:BHARTIARTL",
-        "lt": "NSE:LT",
-        "l&t": "NSE:LT",
-        "axis": "NSE:AXISBANK",
-    }
-    for key, sym in mapping.items():
-        if key in q:
-            return [sym]
-
-    # If user directly types NSE:XXXX
-    for sym in SYMBOLS:
-        if sym.lower() in q:
-            return [sym]
-
-    # Default: show a small set
-    return random.sample(SYMBOLS, k=5)
-
-
-def build_cards(symbols: List[str]) -> List[Dict[str, Any]]:
-    cards = []
-    for s in symbols:
-        p = PRICE_STATE.get(s)
-        if not p:
-            continue
-        cards.append({
-            "symbol": s,
-            "ltp": p["ltp"],
-            "change": p["change"],
-            "change_pct": p["change_pct"],
-            "day_high": p["day_high"],
-            "day_low": p["day_low"],
-            "vol": p["vol"],
-            "news": get_news(s),
-        })
-    return cards
+def route_intent(message: str) -> str:
+    q = (message or "").strip().lower()
+    # very simple intent routing for demo
+    if any(k in q for k in ["template", "design", "canva", "poster", "resume", "logo", "story"]):
+        return "templates"
+    if any(k in q for k in ["hotel", "booking", "stay", "room", "goa", "mumbai", "delhi", "bangalore", "bengaluru", "jaipur"]):
+        return "hotels"
+    if any(k in q for k in ["stock", "price", "buy", "sell", "nse", "reliance", "tcs", "hdfc", "infy", "itc"]):
+        return "stocks"
+    if any(k in q for k in ["all", "everything", "explore", "discover"]):
+        return "all"
+    return "all"
 
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    # Serve the single-page UI
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    """
-    Returns ONLY carousel items (cards) + a short assistant line.
-    """
-    symbols = pick_symbols_from_message(req.message)
-    cards = build_cards(symbols)
-    assistant = f"Showing {len(cards)} symbols in carousel (demo live tickers)."
-    return {"assistant": assistant, "cards": cards}
+    intent = route_intent(req.message)
+
+    carousels: List[Dict[str, Any]] = []
+
+    if intent in ("templates", "all"):
+        items = [
+            build_item(t, actions=[{"label": "Use", "action": "USE_TEMPLATE"}, {"label": "Preview", "action": "PREVIEW"}])
+            for t in random.sample(TEMPLATES, k=min(5, len(TEMPLATES)))
+        ]
+        carousels.append(carousel("templates", "Templates", "Pick a starting point (carousel-only)", items))
+
+    if intent in ("hotels", "all"):
+        items = [
+            build_item(h, actions=[{"label": "Book", "action": "BOOK"}, {"label": "Save", "action": "SAVE"}])
+            for h in random.sample(HOTELS, k=min(5, len(HOTELS)))
+        ]
+        carousels.append(carousel("hotels", "Stays & Deals", "Demo hotel cards (carousel-only)", items))
+
+    if intent in ("stocks", "all"):
+        items = [
+            build_item(s, actions=[{"label": "Buy", "action": "BUY"}, {"label": "Sell", "action": "SELL"}])
+            for s in random.sample(STOCKS, k=min(5, len(STOCKS)))
+        ]
+        carousels.append(carousel("stocks", "Market Watch", "Demo live tickers (random)", items))
+
+    assistant_text = "Showing carousels based on your request. (Demo data, live updates via WebSocket.)"
+
+    return {"assistant_text": assistant_text, "carousels": carousels}
 
 
-@app.post("/api/order")
-def place_order(payload: Dict[str, Any]):
+@app.post("/api/action")
+def action(payload: Dict[str, Any]):
     """
-    Demo order endpoint. In real version, validate user auth, risk checks, broker API, etc.
+    Demo action handler for card buttons.
+    In real apps, this triggers workflows: create design, book hotel, place order, etc.
     """
-    # Minimal validation
-    symbol = payload.get("symbol")
-    side = payload.get("side")
-    qty = int(payload.get("qty", 1))
-    if symbol not in SYMBOLS:
-        return {"ok": False, "error": "Unknown symbol"}
-    if side not in ("BUY", "SELL"):
-        return {"ok": False, "error": "Invalid side"}
-    if qty <= 0:
-        return {"ok": False, "error": "Qty must be > 0"}
-
+    item_id = payload.get("item_id")
+    action_name = payload.get("action")
     return {
         "ok": True,
-        "message": f"Demo order accepted: {side} {qty} of {symbol}",
-        "order_id": f"DEMO-{int(time.time())}-{random.randint(100,999)}"
+        "message": f"Action '{action_name}' received for item '{item_id}' (demo)."
     }
 
 
-# ---------- WebSocket price streamer ----------
-async def price_engine():
-    """
-    Continuously mutate PRICE_STATE to simulate live ticks.
-    """
+# ---------- WebSocket "live" updater ----------
+async def live_engine():
     while True:
-        for s, p in PRICE_STATE.items():
-            old = p["ltp"]
-            drift = random.uniform(-0.8, 0.8)  # small drift
-            new = max(1.0, old + drift)
-            p["ltp"] = round(new, 2)
-            p["change"] = round(new - (old - p["change"]), 2)  # approximate
-            # safer: compute pct from a fake prev_close
-            prev_close = max(1.0, p.get("prev_close", old))
-            p["prev_close"] = prev_close
-            p["change"] = round(new - prev_close, 2)
-            p["change_pct"] = round((p["change"] / prev_close) * 100.0, 2)
+        # Templates: uses and growth
+        for t in TEMPLATES:
+            v = LIVE[t["id"]]
+            uses = int(v["primary_value"].split()[0].replace(",", ""))
+            uses += random.randint(0, 120)
+            v["primary_value"] = f"{uses:,} uses"
+            v["secondary_value"] = f"+{random.randint(1, 30)}% this week"
+            v["updated_at"] = int(time.time())
 
-            p["day_high"] = round(max(p["day_high"], new), 2)
-            p["day_low"] = round(min(p["day_low"], new), 2)
-            p["vol"] = int(p["vol"] + random.randint(100, 8000))
-            p["updated_at"] = int(time.time())
+        # Hotels: price and discount wiggle
+        for h in HOTELS:
+            price = random.randint(1800, 12000)
+            LIVE[h["id"]] = {
+                "primary_value": f"₹{price}/night",
+                "secondary_value": f"{random.randint(5, 40)}% off",
+                "updated_at": int(time.time()),
+            }
 
-        await asyncio.sleep(0.35)
+        # Stocks: price + percent
+        for s in STOCKS:
+            old = float(LIVE[s["id"]]["primary_value"].replace("₹", ""))
+            new = max(1.0, old + random.uniform(-2.5, 2.5))
+            pct = random.uniform(-2.5, 2.5)
+            LIVE[s["id"]]["primary_value"] = f"₹{new:.2f}"
+            LIVE[s["id"]]["secondary_value"] = f"{pct:+.2f}%"
+            LIVE[s["id"]]["updated_at"] = int(time.time())
+
+        await asyncio.sleep(0.6)
 
 
 @app.on_event("startup")
 async def on_startup():
-    asyncio.create_task(price_engine())
+    asyncio.create_task(live_engine())
 
 
-@app.websocket("/ws/prices")
-async def ws_prices(ws: WebSocket):
+@app.websocket("/ws/live")
+async def ws_live(ws: WebSocket):
     """
     Client subscribes with:
-      {"type":"subscribe","symbols":["NSE:RELIANCE","NSE:TCS"]}
-    Then server pushes:
-      {"type":"tick","data":{...}}
+      {"type":"subscribe","item_ids":["tpl_ig_post","stk_TCS",...]}
+    Server pushes:
+      {"type":"update","data": {"item_id": {"primary_value":"...", "secondary_value":"..."} } }
     """
     await ws.accept()
     subscribed: List[str] = []
 
     try:
         while True:
-            # Non-blocking receive with timeout: allow pushing ticks even if no incoming messages
             try:
-                msg = await asyncio.wait_for(ws.receive_text(), timeout=0.2)
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=0.25)
                 data = json.loads(msg)
                 if data.get("type") == "subscribe":
-                    requested = data.get("symbols") or []
-                    subscribed = [s for s in requested if s in SYMBOLS]
-                    await ws.send_text(json.dumps({"type": "subscribed", "symbols": subscribed}))
+                    requested = data.get("item_ids") or []
+                    subscribed = [i for i in requested if i in LIVE]
+                    await ws.send_text(json.dumps({"type": "subscribed", "item_ids": subscribed}))
             except asyncio.TimeoutError:
                 pass
 
             if subscribed:
-                snap = {s: PRICE_STATE[s] for s in subscribed if s in PRICE_STATE}
-                await ws.send_text(json.dumps({"type": "tick", "data": snap}))
+                snap = {i: LIVE[i] for i in subscribed if i in LIVE}
+                await ws.send_text(json.dumps({"type": "update", "data": snap}))
     except WebSocketDisconnect:
         return
